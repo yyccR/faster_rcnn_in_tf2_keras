@@ -7,8 +7,8 @@ import os
 import numpy as np
 import tensorflow as tf
 from bbox_ops import bbox_transform_inv_tf, multi_bbox_transform_inv, \
-    clip_boxes_tf, clip_boxes, proposal_target_layer, box_nms, ProposalTargetLayer
-from anchors_ops import anchor_target_layer, generate_anchors_pre_tf, GenerateAnchors, AnchorTargetLayer
+    clip_boxes_tf, clip_boxes, box_nms, ProposalTargetLayer
+from anchors_ops import generate_anchors_pre_tf, GenerateAnchors, AnchorTargetLayer
 from vgg16 import Vgg16
 from data.generate_voc_data import DataGenerator
 from data.visual_ops import draw_bounding_box
@@ -115,10 +115,6 @@ class FasterRCNN:
                  smooth_l1_rpn_sigma=3.0,
                  smooth_l1_rcnn_sigma=1.0,
                  pixel_mean = np.array([[[102.9801, 115.9465, 122.7717]]])):
-        # self.anchor_targets = {}
-        # self.proposal_targets = {}
-        # self.predictions = {}
-        # self.losses = {}
         self.gt_boxes = []
         self.im_info = []
         self.anchors = []
@@ -157,139 +153,6 @@ class FasterRCNN:
         self.smooth_l1_rcnn_sigma = smooth_l1_rcnn_sigma
         self.pixel_mean = pixel_mean
 
-    def _anchor_target_layer(self, rpn_cls_score, anchors, gt_boxes, im_info):
-        """ gt_box与anchors进行比对, 输出每个rpn的最终label """
-        rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights = anchor_target_layer(
-            rpn_cls_score=rpn_cls_score,
-            gt_boxes=gt_boxes[0],
-            im_info=im_info,
-            all_anchors=anchors,
-            num_anchors=self.num_anchors,
-            rpn_negative_overlap=self.rpn_negative_overlap,
-            rpn_positive_overlap=self.rpn_positive_overlap,
-            rpn_fg_fraction=self.rpn_fg_fraction,
-            rpn_batchsize=self.rpn_batchsize,
-            rpn_bbox_inside_weights=self.rpn_bbox_inside_weights,
-            rpn_positive_weight=self.rpn_positive_weight
-        )
-
-        rpn_labels = tf.cast(rpn_labels, dtype=tf.int32)
-
-        # [1,1, 9*height,width]
-        # self.anchor_targets['rpn_labels'] = rpn_labels
-        # # [1,height,width, 9*4]
-        # self.anchor_targets['rpn_bbox_targets'] = rpn_bbox_targets
-        # # [1,height,width, 9*4]
-        # self.anchor_targets['rpn_bbox_inside_weights'] = rpn_bbox_inside_weights
-        # # [1,height,width, 9*4]
-        # self.anchor_targets['rpn_bbox_outside_weights'] = rpn_bbox_outside_weights
-
-        return rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights
-
-    def _propposal_layer(self, rpn_cls_prob, rpn_bbox_pred, anchors, im_info):
-        """ 预测的边框与anchors进行比对, 非极大抑制后输出最终目标边框, 这里边框处理成了[x1,y1,x2,y2] """
-
-        # Get the scores and bounding boxes
-        scores = tf.reshape(rpn_cls_prob, (-1, 2))[:,1]
-        # scores = rpn_cls_prob[:, :, :, self.num_anchors:]
-        scores = tf.reshape(scores, shape=(-1,))
-        rpn_bbox_pred = tf.reshape(rpn_bbox_pred, shape=(-1, 4))
-
-        proposals = bbox_transform_inv_tf(anchors, rpn_bbox_pred)
-        proposals = clip_boxes_tf(proposals, im_info)
-
-        # Non-maximal suppression
-        indices = tf.image.non_max_suppression(boxes=proposals,
-                                               scores=scores,
-                                               max_output_size=self.rpn_post_nms_top_n,
-                                               iou_threshold=self.rpn_nms_threshold)
-
-        boxes = tf.gather(proposals, indices)
-        boxes = tf.cast(boxes, tf.float32)
-        scores = tf.gather(scores, indices)
-        scores = tf.reshape(scores, shape=(-1, 1))
-
-        # Only support single image as input
-        batch_inds = tf.zeros((tf.shape(indices)[0], 1), dtype=tf.float32)
-        blob = tf.concat([batch_inds, boxes], 1)
-
-        return blob, scores
-
-    def _proposal_target_layer(self, rois, roi_scores, gt_boxes):
-        """ 对边框采样标注, 再基于roi[x1,y1,x2,y2]计算bbox_targets[dx,dy,dw,dh]
-
-        :param rois: rpn, proposal_layer的输出, [[0, x1, y1, x2, y2],...]
-        :param roi_scores: 每个边框的预测置信分
-        """
-        rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = \
-            proposal_target_layer(
-                rpn_rois=rois,
-                rpn_scores=roi_scores,
-                gt_boxes=gt_boxes[0],
-                num_classes=self.num_classes,
-                use_gt=self.use_gt,
-                train_batch_size=self.train_roi_batch_size,
-                fg_fraction=self.fg_fraction,
-                train_fg_thresh=self.train_fg_thresh,
-                train_bg_thresh_hi=self.train_bg_thresh_hi,
-                train_bg_thresh_lo=self.train_bg_thresh_lo,
-                train_bbox_normalize_targets_precomputed=self.train_bbox_normalize_targets_precomputed,
-                train_bbox_normalize_means=self.train_bbox_normalize_means,
-                train_bbox_normalize_stds=self.train_bbox_normalize_stds,
-                bbox_inside_weight=self.bbox_inside_weight
-            )
-
-        labels = tf.cast(labels, dtype=tf.int32)
-
-        # [256, 5]
-        # self.proposal_targets['rois'] = rois
-        # # [256, 1]
-        # self.proposal_targets['labels'] = lables
-        # # [256, 4 * num_classes]
-        # self.proposal_targets['bbox_targets'] = bbox_targets
-        # # [256, 4 * num_classes]
-        # self.proposal_targets['bbox_inside_weights'] = bbox_inside_weights
-        # # [256, 4 * num_classes]
-        # self.proposal_targets['bbox_outside_weights'] = bbox_outside_weights
-
-        return rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights
-
-    def _crop_pool_layer(self, bottom, rois, im_info):
-        """ 裁剪层, 对卷积网络层输出的特征, 根据rpn层输出的roi进行裁剪, 且resize到统一的大小
-
-        :return [bbox_nums, pre_pool_size, pre_pool_size, depth]
-        """
-        batch_ids = tf.squeeze(tf.slice(rois, [0, 0], [-1, 1]), [1])
-        height = im_info[0]
-        width = im_info[1]
-
-        x1 = tf.expand_dims(rois[:, 1] / width, 1)
-        y1 = tf.expand_dims(rois[:, 2] / height, 1)
-        x2 = tf.expand_dims(rois[:, 3] / width, 1)
-        y2 = tf.expand_dims(rois[:, 4] / height, 1)
-        # Won't be back-propagated to rois anyway, but to save time
-        bboxes = tf.stop_gradient(tf.concat([y1, x1, y2, x2], axis=1))
-        pre_pool_size = self.pool_size_after_rpn * 2
-        # [bbox_nums, pre_pool_size, pre_pool_size, depth]
-        crops = tf.image.crop_and_resize(image=bottom,
-                                         boxes=bboxes,
-                                         box_indices=tf.cast(batch_ids, dtype=tf.int32),
-                                         crop_size=[pre_pool_size, pre_pool_size])
-
-        return tf.keras.layers.MaxPooling2D(pool_size=(2, 2), padding='SAME')(crops)
-
-    def _anchor_component(self, height, width):
-        """ 生成anchors, anchors个数与前卷积输出特征图大小相关, = h/16 * w/16 * 9 """
-        # just to get the shape right
-        anchors, anchors_length = generate_anchors_pre_tf(
-            height=height,
-            width=width,
-            feat_stride=self.feat_stride,
-            anchor_scales=self.anchor_scales,
-            anchor_ratios=self.anchor_ratios
-        )
-        return anchors, anchors_length
-
     def _region_proposal_network(self, conv_net, anchors, gt_boxes, im_info, is_training):
         """ rpn网络, 对上个卷积网络输出的特征层做 类别预测和边框预测 """
         anchor_targets = {}
@@ -324,10 +187,6 @@ class FasterRCNN:
 
         if is_training:
             # 预测的边框与anchors进行比对, 非极大抑制后输出最终目标边框[[0, x1, y1, x2, y2],...]及其分值
-            # rois, roi_scores = self._propposal_layer(rpn_cls_prob=rpn_cls_prob,
-            #                                          rpn_bbox_pred=rpn_bbox_pred,
-            #                                          anchors=anchors,
-            #                                          im_info=im_info)
             rois, roi_scores = ProposalLayer(rpn_post_nms_top_n=self.rpn_post_nms_top_n,
                                              rpn_nms_threshold=self.rpn_nms_threshold,
                                              num_anchors=self.num_anchors)(
@@ -338,11 +197,6 @@ class FasterRCNN:
             )
 
             # 生成的anchor与gt_box比对, 输出前景anchor和背景anchor的label
-            # rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights = \
-            #     self._anchor_target_layer(rpn_cls_score=rpn_cls_score,
-            #                               anchors=anchors,
-            #                               gt_boxes=gt_boxes,
-            #                               im_info=im_info)
             rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights = \
                 AnchorTargetLayer(
                     num_anchors=self.num_anchors,
@@ -361,10 +215,6 @@ class FasterRCNN:
 
             # roi采样, 再基于roi[0,x1,y1,x2,y2]计算bbox_targets[dx,dy,dw,dh]
             with tf.control_dependencies([rpn_labels]):
-                # rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = \
-                #     self._proposal_target_layer(rois=rois,
-                #                                 roi_scores=roi_scores,
-                #                                 gt_boxes=gt_boxes)
                 rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights = ProposalTargetLayer(
                     num_classes=self.num_classes,
                     use_gt=self.use_gt,
@@ -415,16 +265,9 @@ class FasterRCNN:
             predictions["rois"] = rois
 
             return rois, roi_scores, labels, anchor_targets, proposal_targets, predictions
-            # return rois, roi_scores, rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights
-            # return rpn_bbox_pred, rpn_bbox_pred, rpn_bbox_pred, rpn_bbox_pred, rpn_bbox_pred, rpn_bbox_pred
 
         else:
             # 预测的边框与anchors进行比对, 非极大抑制后输出最终目标边框[[idx, x1, y1, x2, y2],...]及其分值
-            # rois, roi_scores = self._propposal_layer(rpn_cls_prob=rpn_cls_prob,
-            #                                          rpn_bbox_pred=rpn_bbox_pred,
-            #                                          anchors=anchors,
-            #                                          im_info=im_info)
-
             rois, roi_scores = ProposalLayer(rpn_post_nms_top_n=self.rpn_post_nms_top_n,
                                              rpn_nms_threshold=self.rpn_nms_threshold,
                                              num_anchors=self.num_anchors)(
@@ -444,11 +287,6 @@ class FasterRCNN:
         cls_prob = tf.keras.layers.Softmax(name='cls_prob')(cls_score)
         # cls_pred = tf.argmax(cls_score, axis=1)
         bbox_pred = tf.keras.layers.Dense(units=self.num_classes * 4, kernel_regularizer='l2')(fc7)
-
-        # self.predictions["cls_score"] = cls_score
-        # self.predictions["cls_pred"] = cls_pred
-        # self.predictions["cls_prob"] = cls_prob
-        # self.predictions["bbox_pred"] = bbox_pred
 
         return cls_score, cls_prob, bbox_pred
 
@@ -475,10 +313,8 @@ class FasterRCNN:
 
         # 以下class-loss, bbox-loss为第一次预测损失, 即rpn网络的预测结果
         # RPN, class loss
-        # rpn_cls_score = tf.reshape(predictions['rpn_cls_prob_reshape'], (-1, 2))
         rpn_cls_score = tf.reshape(predictions['rpn_cls_score_reshape'], (-1, 2))
         rpn_label = tf.reshape(anchor_targets['rpn_labels'], (-1,))
-        # rpn_fg_1 = tf.where(rpn_label == 1)
         rpn_select = tf.where(rpn_label != -1)
         # 获取label不为-1的rpn, 只计算这部分的损失, 这部分不是前景就是背景
         rpn_cls_score = tf.reshape(tf.gather(rpn_cls_score, rpn_select), (-1, 2))
@@ -494,8 +330,6 @@ class FasterRCNN:
         rpn_idx = tf.concat([rpn_fg, rpn_bg], axis=0)
         rpn_label = tf.concat([rpn_fg_label, rpn_bg_label], axis=0)
         rpn_cls_score = tf.gather(rpn_cls_score, rpn_idx)
-        # rpn_label = tf.reshape(rpn_label, (-1,))
-        # rpn_cls_score = tf.reshape(rpn_cls_score, (-1,2))
 
         rpn_cross_entropy = 0.
         if tf.shape(rpn_label)[0] > 0:
@@ -518,7 +352,6 @@ class FasterRCNN:
         # 以下class-loss, bbox-loss为第二次预测损失, 即rpn后两层fc的输出, 可以看成RCNN的输出
         # RCNN, class loss
         cls_score = predictions["cls_score"]
-        # cls_score = predictions["cls_prob"]
         label = tf.reshape(proposal_targets["labels"], [-1, ])
         # 同样这里修改原实现, 也是为了处理目标太小时样本的均衡问题
         fg = tf.where(label != 0)
@@ -530,10 +363,6 @@ class FasterRCNN:
         idx = tf.concat([fg, bg], axis=0)
         label = tf.concat([fg_label, bg_label], axis=0)
         cls_score = tf.gather(cls_score, idx)
-        # label_np = np.reshape(np.array(label), (-1,))
-        # cls_score_np = np.reshape(np.array(cls_score), (-1,self.num_classes))
-        # for i in range(len(label_np)):
-        #     print(label_np[i], cls_score_np[i])
 
         cross_entropy = 0.
         if tf.shape(label)[0] > 0:
@@ -544,13 +373,6 @@ class FasterRCNN:
         bbox_pred = predictions['bbox_pred']
         bbox_targets = proposal_targets['bbox_targets']
         bbox_inside_weights = proposal_targets['bbox_inside_weights']
-        # fg_numpy = np.array(np.reshape(fg.numpy(),(-1, )),dtype=np.int32)
-        # fg_label_numpy = np.array(np.reshape(fg_label.numpy(), (-1, )),dtype=np.int32)
-        # bbox_inside_weights_numpy = bbox_inside_weights.numpy()
-        # # print(bbox_inside_weights_numpy[fg_numpy,fg_label_numpy*4:(fg_label_numpy+1)*4])
-        # print(fg_label_numpy)
-        # for i in range(len(fg_numpy)):
-        #     print(bbox_inside_weights_numpy[fg_numpy[i], :])
         bbox_outside_weights = proposal_targets['bbox_outside_weights']
         # RCNN, bbox loss
         loss_box = self._smooth_l1_loss(bbox_pred=bbox_pred,
@@ -559,11 +381,6 @@ class FasterRCNN:
                                         bbox_outside_weights=bbox_outside_weights,
                                         sigma=self.smooth_l1_rcnn_sigma,
                                         dim=1)
-
-        # self.losses['cross_entropy'] = cross_entropy
-        # self.losses['loss_box'] = loss_box
-        # self.losses['rpn_cross_entropy'] = rpn_cross_entropy
-        # self.losses['rpn_loss_box'] = rpn_loss_box
 
         # 这里调整了box损失权重
         cross_entropy = cross_entropy * 0.1
@@ -597,14 +414,6 @@ class FasterRCNN:
         # 生成anchors
         feature_map_height = tf.shape(feature_map)[1]
         feature_map_width = tf.shape(feature_map)[2]
-        # anchors, anchors_length = self._anchor_component(height=feature_map_height, width=feature_map_width)
-        # anchors, anchors_length = generate_anchors_pre_tf(
-        #     height=feature_map_height,
-        #     width=feature_map_width,
-        #     feat_stride=self.feat_stride,
-        #     anchor_scales=self.anchor_scales,
-        #     anchor_ratios=self.anchor_ratios
-        # )
         anchors, anchors_length = GenerateAnchors(feat_stride=self.feat_stride,
                                                   anchor_scales=self.anchor_scales,
                                                   anchor_ratios=self.anchor_ratios)(height=feature_map_height,
@@ -620,7 +429,6 @@ class FasterRCNN:
                                               is_training=is_training)
             #
             # # 后卷积池化全连接, 第二次bbox回归, class分类
-            # pool5 = self._crop_pool_layer(feature_map, rois, im_info)
             pool5 = CropPoolLayer(pool_size_after_rpn=self.pool_size_after_rpn)(
                 bottom=feature_map,
                 rois=rois,
@@ -632,7 +440,6 @@ class FasterRCNN:
             predictions['bbox_pred'] = bbox_pred
 
             model = tf.keras.models.Model(inputs=[im_inputs, gt_boxes],
-                                          # outputs=[rois, roi_scores, anchor_targets, proposal_targets, predictions])
                                           outputs=[anchor_targets, proposal_targets, predictions, cls_prob, bbox_pred])
 
             return model
@@ -645,7 +452,6 @@ class FasterRCNN:
                                               im_info=im_info,
                                               is_training=is_training)
             # 后卷积池化全连接, 第二次bbox回归, class分类
-            # pool5 = self._crop_pool_layer(feature_map, rois, im_info)
             pool5 = CropPoolLayer(pool_size_after_rpn=self.pool_size_after_rpn)(
                 bottom=feature_map,
                 rois=rois,
@@ -660,7 +466,6 @@ class FasterRCNN:
 
         faster_rcnn_model = self.build_graph(is_training=True)
         faster_rcnn_model.summary()
-        # print(faster_rcnn_model.trainable_variables)
         optimizer = tf.keras.optimizers.Adam(1e-5)
         # optimizer = tf.keras.optimizers.Nadam(1e-4)
         # optimizer = tf.keras.optimizers.SGD(learning_rate=0.001,momentum=0.9)
@@ -685,7 +490,6 @@ class FasterRCNN:
         #                                     train_bg_thresh_hi=self.train_bg_thresh_hi,
         #                                     train_bg_thresh_lo=0.)
         summary_writer = tf.summary.create_file_writer(log_dir)
-        # tf.summary.trace_on(graph=True, profiler=True)
 
         for epoch in range(epochs):
             for batch in range(train_data_generator.total_batch_size):
@@ -818,7 +622,6 @@ class FasterRCNN:
                 boxes_dets = cls_boxes[keep, :]
 
             return cls_dets, boxes_dets
-
 
     def test(self):
         frcnn = self.build_graph(is_training=False)
