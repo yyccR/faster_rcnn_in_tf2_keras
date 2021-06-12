@@ -3,12 +3,12 @@ from __future__ import division
 from __future__ import print_function
 
 import sys
-sys.path.append("../../../detector_in_keras")
+sys.path.append("../faster_rcnn_in_tf2_keras")
 
 
 import numpy as np
 import tensorflow as tf
-from models.faster_rcnn.bbox_ops import bbox_overlaps_tf, bbox_transform_tf
+from bbox_ops import bbox_overlaps_tf, bbox_transform_tf
 
 class GenerateAnchors(tf.keras.layers.Layer):
     def __init__(self, feat_stride=16, anchor_scales=(8, 16, 32), anchor_ratios=(0.5, 1, 2)):
@@ -334,164 +334,6 @@ class AnchorTargetLayer(tf.keras.layers.Layer):
 
         return rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights
 
-
-def anchor_target_layer(rpn_cls_score, gt_boxes, im_info, all_anchors, num_anchors,
-                        rpn_negative_overlap=0.3, rpn_positive_overlap=0.7, rpn_fg_fraction=0.5,
-                        rpn_batchsize=256, rpn_bbox_inside_weights=(1.0, 1.0, 1.0, 1.0),
-                        rpn_positive_weight=-1):
-    """Same as the anchor target layer in original Fast/er RCNN """
-    A = num_anchors
-    total_anchors = tf.shape(all_anchors)[0]
-
-    # allow boxes to sit over the edge by a small amount
-    _allowed_border = 0
-
-    # map of shape (..., H, W, C)
-    height = tf.shape(rpn_cls_score)[1]
-    width = tf.shape(rpn_cls_score)[2]
-
-    # only keep anchors inside the image
-    inds_inside = tf.reshape(tf.where(
-        (all_anchors[:, 0] >= -_allowed_border) &
-        (all_anchors[:, 1] >= -_allowed_border) &
-        (all_anchors[:, 2] < (im_info[1] + _allowed_border)) &  # width
-        (all_anchors[:, 3] < (im_info[0] + _allowed_border))  # height
-    ), shape=(-1,))
-    # keep only inside anchors
-    anchors = tf.gather(all_anchors, inds_inside)
-
-    # label: 1 is positive, 0 is negative, -1 is don't care
-    labels = tf.zeros_like(inds_inside, dtype=tf.float32)
-    labels -= 1.
-    ones = tf.ones_like(inds_inside, dtype=tf.float32)
-    zeros = tf.zeros_like(inds_inside, dtype=tf.float32)
-
-    # overlaps between the anchors and the gt boxes
-    # overlaps (ex, gt)
-    overlaps = bbox_overlaps_tf(anchors, gt_boxes[:, :4])
-
-    # 获取每个anchor跟那个gt_box的overlap最大
-    argmax_overlaps = tf.cast(tf.argmax(overlaps, axis=1), dtype=tf.int32)
-    argmax_gather_nd_inds = tf.stack([tf.range(tf.shape(overlaps)[0]), argmax_overlaps], axis=1)
-    max_overlaps = tf.gather_nd(overlaps, argmax_gather_nd_inds)
-
-    # 获取每个gt_box跟哪个anchor的overlap最大，这里直接将该anchor当成了gt_box
-    gt_argmax_overlaps = tf.cast(tf.argmax(overlaps, axis=0), dtype=tf.int32)
-    max_overlaps_gather_nd_inds = tf.stack([gt_argmax_overlaps, tf.range(tf.shape(overlaps)[1])], axis=1)
-    gt_max_overlaps = tf.gather_nd(overlaps, max_overlaps_gather_nd_inds)
-    gt_argmax_overlaps = tf.where(overlaps == gt_max_overlaps)[:, 0]
-
-    labels = tf.where(max_overlaps < rpn_negative_overlap, zeros, labels)
-
-    # fg label: for each gt, anchor with highest overlap
-    unique_gt_argmax_overlaps = tf.unique(gt_argmax_overlaps)[0]
-    highest_fg_label = tf.gather(labels, unique_gt_argmax_overlaps) * -1.
-    highest_gt_row_ids_expand_dim = tf.expand_dims(unique_gt_argmax_overlaps, axis=1)
-    labels = tf.tensor_scatter_nd_update(labels, highest_gt_row_ids_expand_dim, highest_fg_label)
-
-    # fg label: above threshold IOU
-    labels = tf.where(max_overlaps >= rpn_positive_overlap, ones, labels)
-
-    # subsample positive labels if we have too many
-    num_fg = int(rpn_fg_fraction * rpn_batchsize)
-    fg_inds = tf.reshape(tf.where(labels == 1), shape=(-1,))
-    fg_inds_num = tf.shape(fg_inds)[0]
-
-    def random_disable_labels(labels_input, inds, disable_nums):
-        shuffle_fg_inds = tf.random.shuffle(inds)
-        disable_inds = shuffle_fg_inds[:disable_nums]
-        disable_inds_expand_dim = tf.expand_dims(disable_inds, axis=1)
-        neg_ones = tf.ones_like(disable_inds, dtype=tf.float32) * -1.
-        return tf.tensor_scatter_nd_update(labels_input, disable_inds_expand_dim, neg_ones)
-
-    fg_flag = tf.cast(fg_inds_num > num_fg, dtype=tf.float32)
-    labels = fg_flag * random_disable_labels(labels, fg_inds, fg_inds_num - num_fg) + \
-             (1.0 - fg_flag) * labels
-
-    # subsample negative labels if we have too many
-    num_bg = rpn_batchsize - tf.shape(tf.where(labels == 1))[0]
-    # bg_inds = np.where(labels == 0)[0]
-    bg_inds = tf.reshape(tf.where(labels == 0), shape=(-1,))
-    bg_inds_num = tf.shape(bg_inds)[0]
-    bg_flag = tf.cast(bg_inds_num > num_bg, dtype=tf.float32)
-    labels = bg_flag * random_disable_labels(labels, bg_inds, bg_inds_num - num_bg) + \
-             (1.0 - bg_flag) * labels
-
-    # 此处将每个anchor与gt_box对准，gt_box与anchor的dx,dy,dw,dh，用来与模型预测的box计算损失
-    bbox_targets = bbox_transform_tf(anchors, tf.gather(gt_boxes, argmax_overlaps, axis=0)[:, :4])
-
-    # bbox_inside_weights = np.zeros((len(inds_inside), 4), dtype=np.float32)
-    bbox_inside_weights = tf.zeros((tf.shape(inds_inside)[0], 4), dtype=tf.float32, name='bbox_inside_weights')
-    # only the positive ones have regression targets
-    bbox_inside_inds = tf.reshape(tf.where(labels == 1), shape=[-1, ])
-    bbox_inside_inds_weights = tf.gather(bbox_inside_weights, bbox_inside_inds) + rpn_bbox_inside_weights
-    bbox_inside_inds_expand = tf.expand_dims(bbox_inside_inds, axis=1)
-    bbox_inside_weights = tf.tensor_scatter_nd_update(bbox_inside_weights,
-                                                      bbox_inside_inds_expand,
-                                                      bbox_inside_inds_weights)
-
-    # bbox_outside_weights = np.zeros((len(inds_inside), 4), dtype=np.float32)
-    bbox_outside_weights = tf.zeros((tf.shape(inds_inside)[0], 4), dtype=tf.float32, name='bbox_outside_weights')
-    if rpn_positive_weight < 0:
-        # uniform weighting of examples (given non-uniform sampling)
-        num_examples = tf.reduce_sum(tf.cast(labels >= 0, dtype=tf.float32))
-        positive_weights = tf.ones((1, 4), dtype=tf.float32) / num_examples
-        negative_weights = tf.ones((1, 4), dtype=tf.float32) / num_examples
-
-    else:
-        assert ((rpn_positive_weight > 0) & (rpn_positive_weight < 1))
-        positive_weights = rpn_positive_weight / tf.reduce_sum(tf.cast(labels == 1, dtype=tf.float32))
-        negative_weights = (1.0 - rpn_positive_weight) / tf.reduce_sum(tf.cast(labels == 0, dtype=tf.float32))
-
-    bbox_outside_positive_inds = bbox_inside_inds
-    bbox_outside_negative_inds = tf.reshape(tf.where(labels == 0), shape=[-1, ])
-    bbox_outside_positive_inds_weights = tf.gather(bbox_outside_weights, bbox_outside_positive_inds) + positive_weights
-    bbox_outside_negative_inds_weights = tf.gather(bbox_outside_weights, bbox_outside_negative_inds) + negative_weights
-    bbox_outside_positive_inds_expand = tf.expand_dims(bbox_outside_positive_inds, axis=1)
-    bbox_outside_negative_inds_expand = tf.expand_dims(bbox_outside_negative_inds, axis=1)
-    bbox_outside_weights = tf.tensor_scatter_nd_update(bbox_outside_weights,
-                                                       bbox_outside_positive_inds_expand,
-                                                       bbox_outside_positive_inds_weights)
-    bbox_outside_weights = tf.tensor_scatter_nd_update(bbox_outside_weights,
-                                                       bbox_outside_negative_inds_expand,
-                                                       bbox_outside_negative_inds_weights)
-
-    # 这里把上面处理完的目标anchors,labels,boxes,weights的size处理成一开始传进来的大小
-    labels = _unmap(labels, total_anchors, inds_inside, fill=-1, type='labels')
-    bbox_targets = _unmap(bbox_targets, total_anchors, inds_inside, fill=0, type='bbox_targets')
-    bbox_inside_weights = _unmap(bbox_inside_weights, total_anchors, inds_inside, fill=0, type='bbox_inside_weights')
-    bbox_outside_weights = _unmap(bbox_outside_weights, total_anchors, inds_inside, fill=0, type='bbox_outside_weights')
-
-    # labels, 这里reshape成anchor的数目, anchor的总数等于(原图宽/16 * 原图高/16 * 9)
-    rpn_labels = tf.reshape(labels, (1, height, width, A))
-    rpn_bbox_targets = tf.reshape(bbox_targets, (1, height, width, A * 4), name='rpn_bbox_targets')
-    rpn_bbox_inside_weights = tf.reshape(bbox_inside_weights, (1, height, width, A * 4), name='rpn_bbox_inside_weights')
-    rpn_bbox_outside_weights = tf.reshape(bbox_outside_weights, (1, height, width, A * 4),
-                                          name='rpn_bbox_outside_weights')
-
-    return rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights
-    # return labels, labels, labels, im_info
-
-def _random_disable_labels(labels_input, inds, disable_nums):
-    shuffle_fg_inds = tf.random.shuffle(inds)
-    disable_inds = shuffle_fg_inds[:disable_nums]
-    disable_inds_expand_dim = tf.expand_dims(disable_inds, axis=1)
-    neg_ones = tf.ones_like(disable_inds, dtype=tf.float32) * -1.
-    return tf.tensor_scatter_nd_update(labels_input, disable_inds_expand_dim, neg_ones)
-
-def _unmap(data, count, inds, fill, type):
-    """ Unmap a subset of item (data) back to the original set of items (of
-    size count) """
-    if type == 'labels':
-        ret = tf.zeros((count,), dtype=tf.float32, name="unmap_" + type)
-        ret += fill
-        inds_expand = tf.expand_dims(inds, axis=1)
-        return tf.tensor_scatter_nd_update(ret, inds_expand, data)
-    else:
-        ret = tf.zeros(tf.concat([[count, ], tf.shape(data)[1:]], axis=0), dtype=tf.float32, name="unmap_" + type)
-        ret += fill
-        inds_expand = tf.expand_dims(inds, axis=1)
-        return tf.tensor_scatter_nd_update(ret, inds_expand, data)
 
 
 if __name__ == '__main__':
