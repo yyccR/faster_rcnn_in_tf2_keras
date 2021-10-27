@@ -1,5 +1,8 @@
 ## faster rcnn in tf2-keras
 
+### bilibili视频讲解
+[![Watch the video](https://raw.githubusercontent.com/yyccR/Pictures/master/faster_rcnn/faster-rcnn视频页.png)](https://www.bilibili.com/video/BV1Eg411G77J?share_source=copy_web)
+
 
 ### 测试效果 Faster-RCNN
 
