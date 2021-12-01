@@ -674,14 +674,14 @@ if __name__ == "__main__":
     # np.set_printoptions(suppress=True)
     # frcnn = FasterRCNN(rpn_positive_overlap=0.7, classes=['__background__', 'cat', 'dog'])
     # frcnn.train(epochs=100, data_root_path='../../data/detect_data', log_dir='./logs', save_path='./')
-    # frcnn = FasterRCNN(rpn_positive_overlap=0.7,
-    #                    classes=['__background__','bird', 'cat', 'cow', 'dog', 'horse', 'sheep','aeroplane',
-    #                             'bicycle', 'boat', 'bus', 'car', 'motorbike', 'train', 'bottle', 'chair',
-    #                             'diningtable', 'pottedplant', 'sofa', 'tvmonitor','person'])
-    # frcnn.train(epochs=100, data_root_path='../../data/voc_data', log_dir='./logs', save_path='./')
+    frcnn = FasterRCNN(rpn_positive_overlap=0.7,
+                       classes=['__background__','bird', 'cat', 'cow', 'dog', 'horse', 'sheep','aeroplane',
+                                'bicycle', 'boat', 'bus', 'car', 'motorbike', 'train', 'bottle', 'chair',
+                                'diningtable', 'pottedplant', 'sofa', 'tvmonitor','person'])
+    frcnn.train(epochs=100, data_root_path='./data/voc2012_46_sample', log_dir='./logs', save_path='./')
     # frcnn = FasterRCNN(rpn_positive_overlap=0.7,
     #                        classes=['__background__','car'])
     # frcnn.train(epochs=100, data_root_path='../../data/bd100k', log_dir='./logs', save_path='./')
-    frcnn = FasterRCNN(rpn_positive_overlap=0.5,
-                           classes=['__background__','Y'])
-    frcnn.train(epochs=100, data_root_path='../../data/car_logo_data', log_dir='./logs', save_path='./')
+    # frcnn = FasterRCNN(rpn_positive_overlap=0.5,
+    #                        classes=['__background__','Y'])
+    # frcnn.train(epochs=100, data_root_path='./data/voc2012_46_samples', log_dir='./logs', save_path='./')
